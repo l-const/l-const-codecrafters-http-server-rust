@@ -1,3 +1,4 @@
+use core::str;
 #[allow(unused_imports)]
 use std::net::TcpListener;
 use std::{
@@ -21,23 +22,74 @@ fn main() {
     }
 }
 
+const HTTP_OK: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n";
+const HTTP_NOT_FOUND: &[u8] = b"HTTP/1.1 404 Not Found\r\n\r\n";
+
 fn handle_client(mut stream: TcpStream) {
-    let mut buf = Vec::with_capacity(128);
-    'retry: while let Ok(n) =  stream.read(&mut buf) {
+    let mut buf = [0; 150];
+    let result = stream.read(&mut buf);
+    if let Ok(n) = result {
+        let body = str::from_utf8(&buf[..n]).unwrap();
         println!("Read {n} bytes!!");
         println!("Buf size {} ", buf.len());
         println!("Buffer contents: {:?}", &buf);
-        stream.write("HTTP/1.1 200 OK\r\n\r\n".as_bytes());
-        if n == 0 {
-           break 'retry;     
-        } else {
-            break;
+        match extract_request_path(body) {
+            HttpResponseCode::HttpNotFound => {
+                let _ = stream.write(HTTP_NOT_FOUND);
+            }
+            HttpResponseCode::HttpOk => {
+                let _ = stream.write(HTTP_OK);
+            }
         }
     }
-    // if let Ok(n) = result {
-    //     println!("Read {n} bytes!!");
-    //     println!("Buffer contents: {:?}", &buf);
-    // } else {
-    //     eprintln!("Error reading input: {:?}", result.err().unwrap());
-    // }
+
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+}
+
+const CRLF: &str = "\r\n";
+
+fn extract_request_path(request_body: &str) -> HttpResponseCode {
+    let request_line: Vec<&str> = request_body.split_terminator(CRLF).take(1).collect();
+    let request_target: &str = request_line
+        .get(0)
+        .unwrap()
+        .split_terminator(" ")
+        .take(2)
+        .last()
+        .unwrap();
+    dbg!(request_line);
+    dbg!(request_target);
+    if matches!(request_target, "/") {
+        HttpResponseCode::HttpOk
+    } else {
+        HttpResponseCode::HttpNotFound
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum HttpResponseCode {
+    HttpOk = 200,
+    HttpNotFound = 404,
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{extract_request_path, HttpResponseCode};
+
+    static HTTP_OK_BODY: &str =
+        "GET / HTTP/1.1\r\nHost: localhost:4221\r\nUser-Agent: curl/7.64.1\r\nAccept: */*\r\n\r\n";
+    static HTTP_OK_NOT_FOUND: &str = "GET /index.html HTTP/1.1\r\nHost: localhost:4221\r\nUser-Agent: curl/7.64.1\r\nAccept: */*\r\n\r\n";
+
+    #[test]
+    fn test_extract_request_body_http_ok() {
+        assert_eq!(extract_request_path(HTTP_OK_BODY), HttpResponseCode::HttpOk)
+    }
+
+    #[test]
+    fn test_extract_request_body_http_not_found() {
+        assert_eq!(
+            extract_request_path(HTTP_OK_NOT_FOUND),
+            HttpResponseCode::HttpNotFound
+        )
+    }
 }
