@@ -130,7 +130,7 @@ fn extract_request_path(request_body: &str) -> RequestResponse {
             return RequestResponse {
                 request_headers: Vec::default(),
                 request_path: "/user-agent",
-                response_code: HttpResponseCode::HttpBadRequest,
+                response_code: HttpResponseCode::HttpOk,
                 user_agent: user_agent.to_string(),
             }
         }
