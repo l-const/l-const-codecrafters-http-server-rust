@@ -5,14 +5,18 @@ use std::{
     net::TcpStream,
 };
 
+
+
+
 fn main() {
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(100).build().unwrap();
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 println!("accepted new connection");
-                handle_client(stream);
+                pool.scope( |_| handle_client(stream));
             }
             Err(e) => {
                 println!("error: {}", e);
