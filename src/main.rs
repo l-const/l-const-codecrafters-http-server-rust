@@ -43,23 +43,38 @@ fn handle_client(mut stream: TcpStream) {
 
 fn handle_body(stream: &mut TcpStream, body: &str) {
     match extract_request_path(body) {
-        (_, HttpResponseCode::HttpNotFound) => {
+        RequestResponse { response_code: HttpResponseCode::HttpNotFound, .. } => {
             let _ = stream.write(HTTP_NOT_FOUND);
         }
-        (path, HttpResponseCode::HttpOk) => {
+        RequestResponse {request_path: path,  response_code: HttpResponseCode::HttpOk, user_agent,  ..} => {
             if matches!(path, "/") {
                 let _ = stream.write(HTTP_OK);
+            } else if matches!(path, "/user-agent") {
+                let response_body = construct_multiline_response(&user_agent.trim());
+                dbg!(&response_body);
+                let _ = stream.write(response_body.as_bytes());
             } else {
                 let response_body = construct_multiline_response(path);
                 dbg!(&response_body);
                 let _ = stream.write(response_body.as_bytes());
             }
         }
-        (_, HttpResponseCode::HttpBadRequest) => {
+        RequestResponse{ response_code: HttpResponseCode::HttpBadRequest, ..} => {
             let _ = stream.write(HTTP_BAD_REQUEST);
         }
     }
 }
+
+
+#[derive(Debug)]
+struct RequestResponse<'a, 'b>{
+    response_code: HttpResponseCode,
+    request_path: &'a str,
+    request_headers: Vec<&'b str>,
+    user_agent: String,
+}
+
+
 
 fn construct_multiline_response(response_body: &str) -> String {
     let n_bytes = response_body.bytes().len();
@@ -79,28 +94,83 @@ fn construct_multiline_response(response_body: &str) -> String {
     )
 }
 
-fn extract_request_path(request_body: &str) -> (&str, HttpResponseCode) {
+fn find_user_agent_header<'a>(headers: &'a [&str]) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|s| s.to_lowercase().starts_with("user-agent:"))
+        .map(|s| s.split_terminator(":").skip(1).next())
+        .flatten()
+}
+
+fn extract_request_path(request_body: &str) -> RequestResponse {
     let request_line = if let Ok(request) = get_request_line(request_body) {
         request
     } else {
-        return ("", HttpResponseCode::HttpBadRequest);
+        return RequestResponse {
+            request_headers: Vec::default(),
+            request_path: "",
+            response_code: HttpResponseCode::HttpBadRequest,
+            user_agent: "".to_owned()
+        };
     };
     let request_target = if let Ok(request) = get_request_target(request_body) {
         request
     } else {
-        return ("", HttpResponseCode::HttpBadRequest);
+        return RequestResponse {
+            request_headers: Vec::default(),
+            request_path: "",
+            response_code: HttpResponseCode::HttpBadRequest,
+            user_agent: "".to_string()
+        };
     };
     dbg!(request_line);
     dbg!(request_target);
+    let res_headers = if let Ok(headers) = find_headers(request_body) {
+        if let Some(user_agent)  = find_user_agent_header(&headers) {
+            return RequestResponse {
+                request_headers: Vec::default(),
+                request_path: "/user-agent",
+                response_code: HttpResponseCode::HttpBadRequest,
+                user_agent: user_agent.to_string(),
+            }
+        }
+    };
+
     if matches!(request_target, "/") {
-        ("/", HttpResponseCode::HttpOk)
+        return RequestResponse {
+            request_headers: Vec::default(),
+            request_path: "/",
+            response_code: HttpResponseCode::HttpOk,
+            user_agent: "".to_owned()
+        };
     } else {
         // check to see if it is an echo path
         let echo_path_opt = find_echo_path(request_target);
         if let Some(path) = echo_path_opt {
-            return (path, HttpResponseCode::HttpOk);
+            return RequestResponse {
+                request_headers: Vec::default(),
+                request_path: path,
+                response_code: HttpResponseCode::HttpOk,
+                user_agent: "".to_owned()
+            };
         }
-        ("", HttpResponseCode::HttpNotFound)
+        RequestResponse {
+            request_headers: Vec::default(),
+            request_path: "",
+            response_code: HttpResponseCode::HttpNotFound,
+            user_agent: "".to_string()
+        }
+    }
+}
+
+fn find_headers(request_body: &str) -> Result<Vec<&str>, &str> {
+    // BY SPECIFICATION OF THE HTTP protocol we epxect to have this
+    //true
+    let num_crlfs = request_body.matches(CRLF).count();
+    if num_crlfs > 2 {
+        Ok(request_body.split_terminator(CRLF).skip(1).collect()) //skip first between request line and first header
+    } else {
+        Err("no headers!")
     }
 }
 
@@ -165,7 +235,7 @@ mod tests {
     #[test]
     fn test_extract_request_body_http_not_found() {
         assert_eq!(
-            extract_request_path(HTTP_OK_NOT_FOUND).1,
+            extract_request_path(HTTP_OK_NOT_FOUND).response_code,
             HttpResponseCode::HttpNotFound
         )
     }
@@ -173,14 +243,14 @@ mod tests {
     #[test]
     fn test_extract_request_body_http_ok() {
         assert_eq!(
-            extract_request_path(HTTP_OK_BODY).1,
+            extract_request_path(HTTP_OK_BODY).response_code,
             HttpResponseCode::HttpOk
         )
     }
 
     #[test]
     fn test_extract_request_body_http_echo() {
-        assert_eq!(extract_request_path(ECHO_REQUEST).0, "abc")
+        assert_eq!(extract_request_path(ECHO_REQUEST).request_path, "abc")
     }
 
     static expected_response: &str =
