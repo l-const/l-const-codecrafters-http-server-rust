@@ -9,14 +9,14 @@ use std::{
 
 
 fn main() {
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(100).build().unwrap();
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(10).build().unwrap();
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 println!("accepted new connection");
-                pool.scope( |_| handle_client(stream));
+                pool.spawn( || handle_client(stream));
             }
             Err(e) => {
                 println!("error: {}", e);
@@ -37,12 +37,12 @@ fn handle_client(mut stream: TcpStream) {
     let result = stream.read(&mut buf);
     if let Ok(n) = result {
         let body = str::from_utf8(&buf[..n]).unwrap();
-        println!("Read {n} bytes!!");
-        println!("Buf size {} ", buf.len());
+        // println!("Read {n} bytes!!");
+        // println!("Buf size {} ", buf.len());
         handle_body(&mut stream, body);
     }
 
-    let _ = stream.shutdown(std::net::Shutdown::Both);
+    // let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
 fn handle_body(stream: &mut TcpStream, body: &str) {
@@ -127,9 +127,10 @@ fn extract_request_path(request_body: &str) -> RequestResponse {
             user_agent: "".to_string()
         };
     };
-    dbg!(request_line);
-    dbg!(request_target);
+    // dbg!(request_line);
+    // dbg!(request_target);
     let res_headers = if let Ok(headers) = find_headers(request_body) {
+     if request_target.to_lowercase().eq("/user-agent") {
         if let Some(user_agent)  = find_user_agent_header(&headers) {
             return RequestResponse {
                 request_headers: Vec::default(),
@@ -138,6 +139,7 @@ fn extract_request_path(request_body: &str) -> RequestResponse {
                 user_agent: user_agent.to_string(),
             }
         }
+     }
     };
 
     if matches!(request_target, "/") {
