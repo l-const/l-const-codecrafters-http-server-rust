@@ -1,22 +1,47 @@
+
+mod cli;
+
 use core::str;
+use std::fs;
 use std::net::TcpListener;
 use std::{
     io::{Read, Write},
     net::TcpStream,
 };
+use once_cell::sync::Lazy;
 
 
 
+static FILE_DIRECTORY: Lazy<String> = Lazy::new(|| {
+    let args = match cli::parse_args() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Error: {}.", e);
+            std::process::exit(1);
+        }
+    };
+    if let Some(path) = args.directory {
+        path
+    } else {
+        "/tmp/".into()
+    }
+});
 
-fn main() {
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(10).build().unwrap();
+
+fn main() {   
+    println!("File directory {:#?}", FILE_DIRECTORY.as_str());
+
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(10)
+        .build()
+        .unwrap();
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 println!("accepted new connection");
-                pool.spawn( || handle_client(stream));
+                pool.spawn(|| handle_client(stream));
             }
             Err(e) => {
                 println!("error: {}", e);
@@ -29,6 +54,7 @@ const HTTP_OK: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n";
 const HTTP_NOT_FOUND: &[u8] = b"HTTP/1.1 404 Not Found\r\n\r\n";
 const HTTP_BAD_REQUEST: &[u8] = b"HTTP/1.1 400 Bad Request\r\n\r\n";
 const CONTENT_TYPE: &str = "Content-Type: text/plain\r\n";
+const CONTENT_TYPE_OCTET_STREAM: &str = "Content-Type: application/octet-stream\r\n";
 const CONTENT_LENGTH: &str = "Content-Length: {n_bytes}\r\n";
 const CRLF: &str = "\r\n";
 
@@ -47,38 +73,63 @@ fn handle_client(mut stream: TcpStream) {
 
 fn handle_body(stream: &mut TcpStream, body: &str) {
     match extract_request_path(body) {
-        RequestResponse { response_code: HttpResponseCode::HttpNotFound, .. } => {
+        RequestResponse {
+            response_code: HttpResponseCode::HttpNotFound,
+            ..
+        } => {
             let _ = stream.write(HTTP_NOT_FOUND);
         }
-        RequestResponse {request_path: path,  response_code: HttpResponseCode::HttpOk, user_agent,  ..} => {
+        RequestResponse {
+            request_path: path,
+            response_code: HttpResponseCode::HttpOk,
+            user_agent,
+            ..
+        } => {
             if matches!(path, "/") {
                 let _ = stream.write(HTTP_OK);
             } else if matches!(path, "/user-agent") {
                 let response_body = construct_multiline_response(&user_agent.trim());
                 dbg!(&response_body);
                 let _ = stream.write(response_body.as_bytes());
+            }  else if path.starts_with("/files/") {
+                // TODO: stuff
+                dbg!(&path);
+
+                let filename_opt = path.split_terminator("/files/").last();
+                let path = &format!("{}{}", FILE_DIRECTORY.as_str(), filename_opt.unwrap());
+                if filename_opt.is_none() || fs::metadata(&path).is_err() {
+                    let _ = stream.write(HTTP_NOT_FOUND);
+                }
+                let file_content = fs::read(&path);
+
+                if let Err(_) = file_content {
+                    let _  = stream.write(HTTP_BAD_REQUEST);
+                }
+                let response_body = construct_octet_response(&file_content.unwrap());
+                dbg!(&response_body);
+                let _ = stream.write(&response_body);
             } else {
                 let response_body = construct_multiline_response(path);
                 dbg!(&response_body);
                 let _ = stream.write(response_body.as_bytes());
             }
         }
-        RequestResponse{ response_code: HttpResponseCode::HttpBadRequest, ..} => {
+        RequestResponse {
+            response_code: HttpResponseCode::HttpBadRequest,
+            ..
+        } => {
             let _ = stream.write(HTTP_BAD_REQUEST);
         }
     }
 }
 
-
 #[derive(Debug)]
-struct RequestResponse<'a, 'b>{
+struct RequestResponse<'a, 'b> {
     response_code: HttpResponseCode,
     request_path: &'a str,
     request_headers: Vec<&'b str>,
     user_agent: String,
 }
-
-
 
 fn construct_multiline_response(response_body: &str) -> String {
     let n_bytes = response_body.bytes().len();
@@ -98,6 +149,26 @@ fn construct_multiline_response(response_body: &str) -> String {
     )
 }
 
+
+fn construct_octet_response(response_body: &[u8]) -> Vec<u8> {
+    let n_bytes = response_body.len();
+    let content_length = format!("Content-Length: {n_bytes}\r\n");
+    let http_code_slice = str::from_utf8(HTTP_OK).unwrap();
+    let len = http_code_slice.len() - 2;
+    //http status code \r\n
+    // headers(content type + length) + \r\n for each header
+    // \r\n
+    //body
+    let message = format!(
+        "{}{}{}\r\n",
+        &http_code_slice[0..len],
+        CONTENT_TYPE_OCTET_STREAM,
+        content_length,
+    );
+    [message.as_bytes(), response_body].concat()
+}
+
+
 fn find_user_agent_header<'a>(headers: &'a [&str]) -> Option<&'a str> {
     headers
         .iter()
@@ -114,7 +185,7 @@ fn extract_request_path(request_body: &str) -> RequestResponse {
             request_headers: Vec::default(),
             request_path: "",
             response_code: HttpResponseCode::HttpBadRequest,
-            user_agent: "".to_owned()
+            user_agent: "".to_owned(),
         };
     };
     let request_target = if let Ok(request) = get_request_target(request_body) {
@@ -124,22 +195,22 @@ fn extract_request_path(request_body: &str) -> RequestResponse {
             request_headers: Vec::default(),
             request_path: "",
             response_code: HttpResponseCode::HttpBadRequest,
-            user_agent: "".to_string()
+            user_agent: "".to_string(),
         };
     };
     // dbg!(request_line);
     // dbg!(request_target);
     let res_headers = if let Ok(headers) = find_headers(request_body) {
-     if request_target.to_lowercase().eq("/user-agent") {
-        if let Some(user_agent)  = find_user_agent_header(&headers) {
-            return RequestResponse {
-                request_headers: Vec::default(),
-                request_path: "/user-agent",
-                response_code: HttpResponseCode::HttpOk,
-                user_agent: user_agent.to_string(),
+        if request_target.to_lowercase().eq("/user-agent") {
+            if let Some(user_agent) = find_user_agent_header(&headers) {
+                return RequestResponse {
+                    request_headers: Vec::default(),
+                    request_path: "/user-agent",
+                    response_code: HttpResponseCode::HttpOk,
+                    user_agent: user_agent.to_string(),
+                };
             }
         }
-     }
     };
 
     if matches!(request_target, "/") {
@@ -147,7 +218,14 @@ fn extract_request_path(request_body: &str) -> RequestResponse {
             request_headers: Vec::default(),
             request_path: "/",
             response_code: HttpResponseCode::HttpOk,
-            user_agent: "".to_owned()
+            user_agent: "".to_owned(),
+        };
+    } else if request_target.starts_with("/files/") {
+        return RequestResponse {
+            request_headers: Vec::default(),
+            request_path: request_target,
+            response_code: HttpResponseCode::HttpOk,
+            user_agent: "".to_owned(),
         };
     } else {
         // check to see if it is an echo path
@@ -157,14 +235,14 @@ fn extract_request_path(request_body: &str) -> RequestResponse {
                 request_headers: Vec::default(),
                 request_path: path,
                 response_code: HttpResponseCode::HttpOk,
-                user_agent: "".to_owned()
+                user_agent: "".to_owned(),
             };
         }
         RequestResponse {
             request_headers: Vec::default(),
             request_path: "",
             response_code: HttpResponseCode::HttpNotFound,
-            user_agent: "".to_string()
+            user_agent: "".to_string(),
         }
     }
 }
